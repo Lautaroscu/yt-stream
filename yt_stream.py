@@ -107,7 +107,8 @@ PRIVACIDAD="public"
 # Días: lun mar mie jue vie sab dom
 HORARIO=""
 
-# Opcional: bitrate de video cuando hay que recodificar (H.265 -> H.264)
+# Opcional: bitrate de video cuando hay que recodificar con la CPU (H.265 -> H.264).
+# Con GPU Intel (VAAPI) se usa calidad constante (qp 19, resolución original) y esto no se aplica.
 VIDEO_BITRATE="4000k"
 
 # Panel web en la red local: http://IP-DE-ESTA-PC:8080
@@ -646,15 +647,31 @@ def probe_codec(cam_url):
         return None
 
 
-def build_ffmpeg_cmd(cam_url, yt_url, codec, bitrate="4000k"):
+VAAPI_DEV = "/dev/dri/renderD128"
+
+
+def has_vaapi():
+    return not IS_WIN and os.path.exists(VAAPI_DEV)
+
+
+def build_ffmpeg_cmd(cam_url, yt_url, codec, bitrate="4000k", hw=True):
+    """hw=True: si hay que recodificar y hay GPU Intel (VAAPI), la usa en vez de la CPU."""
+    pre = []
     if codec == "h264":
         video = ["-c:v", "copy"]
+    elif hw and has_vaapi():
+        # decodifica y codifica en la GPU. El driver Intel libre solo hace CQP (sin -b:v)
+        pre = ["-hwaccel", "vaapi", "-hwaccel_device", VAAPI_DEV,
+               "-hwaccel_output_format", "vaapi"]
+        # resolución original de la cámara; qp 19 ~ 10 Mbps en 1440p (rango recomendado por YouTube)
+        video = ["-vf", "scale_vaapi=format=nv12",
+                 "-c:v", "h264_vaapi", "-low_power", "1", "-qp", "19", "-g", "50"]
     else:
         n = int("".join(c for c in bitrate if c.isdigit()) or 4000)
-        video = ["-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{n}k",
+        video = ["-vf", "scale=-2:1080", "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{n}k",
                  "-maxrate", f"{int(n * 1.125)}k", "-bufsize", f"{n * 2}k",
                  "-pix_fmt", "yuv420p", "-g", "50", "-r", "25"]
-    return [bin_path("ffmpeg"), "-hide_banner", "-loglevel", "error",
+    return [bin_path("ffmpeg"), "-hide_banner", "-loglevel", "error", *pre,
             "-rtsp_transport", "tcp", "-timeout", "10000000", "-thread_queue_size", "512",
             "-i", cam_url,
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
@@ -726,6 +743,7 @@ def run():
     start_panel(read_conf())
     on_air = False  # hay un vivo abierto (para cerrarlo vía API al terminar)
     cam_fails, last_mac_scan = 0, 0.0
+    use_gpu, gpu_fails = True, 0  # tras 3 caídas seguidas (<30 s) con VAAPI, pasa a libx264
 
     while not _stopping:
         conf = read_conf()
@@ -783,7 +801,7 @@ def run():
                 log.error("YouTube API: %s. Uso YT_KEY (título por defecto)", e)
 
         if action == "camera":
-            cmd = build_ffmpeg_cmd(cam, target, codec, conf.get("VIDEO_BITRATE", "4000k"))
+            cmd = build_ffmpeg_cmd(cam, target, codec, conf.get("VIDEO_BITRATE", "4000k"), use_gpu)
         else:
             cmd = build_slate_cmd(target, conf.get("PAUSA_TEXTO") or "Transmisión en pausa")
         try:
@@ -797,8 +815,11 @@ def run():
 
         threading.Thread(target=_pump_stderr, args=(_child,), daemon=True).start()
         on_air = True
+        gpu_run = action == "camera" and codec != "h264" and use_gpu and has_vaapi()
+        started = time.time()
         set_state(state, detail if action == "slate" else
-                  ("" if codec == "h264" else "Recodificando H.265 → H.264"), codec)
+                  ("" if codec == "h264" else
+                   f"Recodificando H.265 → H.264 ({'GPU' if gpu_run else 'CPU'})"), codec)
         _restart_req.clear()
 
         # mientras transmite: reacciona a pausa / finalizar / horario / reinicio
@@ -816,6 +837,14 @@ def run():
                 _terminate(_child)
                 planned = True
         _child.wait()
+
+        if gpu_run and not planned and not _stopping:
+            gpu_fails = gpu_fails + 1 if time.time() - started < 30 else 0
+            if gpu_fails >= 3:
+                use_gpu = False
+                log.warning("La GPU (VAAPI) falló 3 veces seguidas: sigo recodificando con la CPU (libx264)")
+        elif gpu_run:
+            gpu_fails = 0
 
         if not _stopping and not planned:
             set_state("connecting", "Se cortó la transmisión, reconectando")

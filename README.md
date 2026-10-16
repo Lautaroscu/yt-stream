@@ -6,6 +6,7 @@ Proxy **RTSP → YouTube Live**: toma el video de una cámara IP sin RTMP (EZVIZ
 - Linux (systemd) y Windows (tarea programada como SYSTEM).
 - Arranca con la computadora y se recupera solo de cortes de luz, de internet o de la cámara.
 - Detecta el códec: H.264 se copia sin recodificar; H.265 se pasa a H.264.
+- En Linux con GPU Intel recodifica por hardware (VAAPI) a la resolución original, casi sin CPU. Si la GPU falla, sigue con la CPU a 1080p.
 - **Panel web con PIN** para manejarlo desde el celular en la red local: iniciar, pausar, reanudar, finalizar y programar horarios.
 - Pausa con placa "Transmisión en pausa" (el vivo sigue abierto: mismo video en YouTube).
 - Opcional: cada jornada como un vivo separado con título propio (ej. "Torneo Nacional de Bowling - 16/10/2026").
@@ -38,7 +39,7 @@ PRIVACIDAD="public"     # public | unlisted | private
 HORARIO=""              # vacío = siempre · "manual" = solo a mano · ver abajo
 PANEL_PORT="8080"
 PANEL_PIN=""            # vacío = install genera uno de 6 dígitos
-VIDEO_BITRATE="4000k"   # opcional, solo si recodifica
+VIDEO_BITRATE="4000k"   # opcional, solo si recodifica con la CPU
 ```
 
 - **EZVIZ / Hikvision:** usuario `admin`, contraseña = código de verificación (etiqueta de la cámara). Activar RTSP desde la app. `101` = main stream, `102` = substream.
