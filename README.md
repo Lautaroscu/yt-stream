@@ -59,6 +59,8 @@ Al instalar se muestra la dirección y el PIN, por ejemplo `http://192.168.1.20:
 | **Reanudar** | Vuelve a la cámara. |
 | **Finalizar** | Corta y YouTube cierra el vivo. Si había horario, vuelve sola en el próximo. |
 
+**Título del vivo:** se edita desde el panel (`{fecha}` = fecha del día). Con *Cambiar también el vivo que está al aire* se renombra el vivo en curso; si no, aplica desde el próximo. Requiere la cuenta autorizada (`auth`).
+
 **Programación:** *Por horario* (días y horas de inicio/fin), *Siempre* (24 h) o *Solo manual*. Un horario que termina después de medianoche (18:00 a 02:00) pertenece al día en que empieza. También se puede editar `HORARIO` en el `.conf`, sin reiniciar:
 
 ```ini

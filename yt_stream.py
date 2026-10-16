@@ -492,7 +492,7 @@ def start_broadcast(conf):
     if bid and broadcast_status(bid) in ("created", "ready", "testStarting", "testing",
                                          "liveStarting", "live"):
         return rtmp_url
-    title = conf["TITULO"].replace("{fecha}", datetime.now().strftime("%d/%m/%Y"))[:100]
+    title = render_title(conf["TITULO"])
     b = _api("POST", "liveBroadcasts", {"part": "snippet,status,contentDetails"}, {
         "snippet": {"title": title,
                     "scheduledStartTime": datetime.now(timezone.utc).isoformat()},
@@ -505,6 +505,25 @@ def start_broadcast(conf):
     _write_json(STATE_FILE, st)
     log.info("Vivo creado: \"%s\" https://youtu.be/%s", title, b["id"])
     return rtmp_url
+
+
+def render_title(template):
+    return template.replace("{fecha}", datetime.now().strftime("%d/%m/%Y")).strip()[:100]
+
+
+def rename_broadcast(title):
+    """Cambia el título del vivo en curso. Devuelve False si no hay vivo abierto."""
+    bid = _read_json(STATE_FILE).get("broadcast_id")
+    items = _api("GET", "liveBroadcasts", {"part": "snippet", "id": bid}).get("items") if bid else None
+    if not items:
+        return False
+    sn = items[0]["snippet"]
+    # update reemplaza el snippet entero: hay que reenviar los campos obligatorios
+    _api("PUT", "liveBroadcasts", {"part": "snippet"}, {"id": bid, "snippet": {
+        "title": title, "description": sn.get("description", ""),
+        "scheduledStartTime": sn["scheduledStartTime"]}})
+    log.info("Título del vivo cambiado a \"%s\" (https://youtu.be/%s)", title, bid)
+    return True
 
 
 def end_broadcast():
@@ -990,6 +1009,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             return self._send(200, {
                 **STATE, "now": time.time(),
                 "horario": conf.get("HORARIO", ""),
+                "titulo": conf.get("TITULO", ""),
+                "api": TOKEN_FILE.exists(),
                 "logs": last_logs(),
             })
         if path == "/api/snapshot.jpg":
@@ -1043,6 +1064,28 @@ class PanelHandler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "Horario inválido"})
             set_conf_value("HORARIO", spec)
             log.info("Panel: horario cambiado a '%s' desde %s", spec or "siempre (24 h)", ip)
+        elif path == "/api/titulo":
+            body = self._json_body()
+            titulo = str(body.get("titulo", "")).replace("\n", " ").strip()
+            if not titulo:
+                return self._send(400, {"error": "Escribí un título"})
+            if "<" in titulo or ">" in titulo:
+                return self._send(400, {"error": "El título no puede tener < ni >"})
+            if len(render_title(titulo)) < len(titulo.replace("{fecha}", "dd/mm/aaaa")):
+                return self._send(400, {"error": "Máximo 100 caracteres"})
+            if not TOKEN_FILE.exists():
+                return self._send(400, {"error": "Falta autorizar la cuenta de YouTube (yt_stream.py auth)"})
+            set_conf_value("TITULO", titulo)
+            log.info("Panel: título cambiado a '%s' desde %s", titulo, ip)
+            msg = "Título guardado para los próximos vivos"
+            if body.get("actual"):
+                try:
+                    if rename_broadcast(render_title(titulo)):
+                        msg = "Título cambiado, también en el vivo actual"
+                except Exception as e:
+                    log.error("YouTube API: no se pudo renombrar el vivo: %s", e)
+                    return self._send(502, {"error": "Se guardó, pero YouTube no dejó cambiar el vivo actual"})
+            return self._send(200, {"ok": True, "msg": msg})
         else:
             return self._send(404, {"error": "no existe"})
         _wake.set()
@@ -1106,7 +1149,9 @@ button:disabled{opacity:.5}
 .day{display:grid;grid-template-columns:64px minmax(0,1fr) minmax(0,1fr);gap:8px;align-items:center}
 .day label{display:flex;align-items:center;gap:8px;font-weight:600}
 .day input[type=checkbox]{width:20px;height:20px;accent-color:var(--accent)}
-input[type=time],input#pin{font:inherit;width:100%;min-width:0;padding:9px 8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+.chk{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:14px}
+.chk input{width:20px;height:20px;accent-color:var(--accent)}
+input[type=time],input#pin,input#titulo{font:inherit;width:100%;min-width:0;padding:9px 8px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
 .day.off input[type=time]{opacity:.35}
 .copy{margin-top:8px}
 details summary{cursor:pointer;font-weight:650}
@@ -1135,6 +1180,15 @@ pre{font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;wor
   </div>
 
   <div class="card">
+    <h2>Título del vivo</h2>
+    <input id="titulo" maxlength="100" aria-label="Título del vivo" placeholder="Palotes Bowling en vivo - {fecha}">
+    <p class="help">{fecha} se reemplaza por la fecha del día. Ej.: Torneo de los jueves - {fecha}</p>
+    <label class="chk"><input type="checkbox" id="tactual" checked>Cambiar también el vivo que está al aire</label>
+    <button class="primary" id="tsave" style="width:100%;margin-top:12px">Guardar título</button>
+    <div class="msg" id="tmsg"></div>
+  </div>
+
+  <div class="card">
     <h2>Programación</h2>
     <div class="seg" id="seg">
       <button data-k="schedule">Por horario</button><button data-k="always">Siempre</button><button data-k="manual">Solo manual</button>
@@ -1158,7 +1212,7 @@ const LABEL={live:"En vivo",paused:"En pausa",waiting:"En espera",finished:"Fina
 const DAYS=["lun","mar","mie","jue","vie","sab","dom"],DNAME=["Lun","Mar","Mié","Jue","Vie","Sáb","Dom"];
 const KHELP={schedule:"Arranca y termina sola en los horarios marcados. Si el horario termina después de medianoche (ej. 18:00 a 02:00) queda en el mismo día.",
   always:"Transmite las 24 h, todos los días.",manual:"Solo transmite cuando toquen Iniciar."};
-let st={},kind="manual",dirty=false,timer,snapTimer,busy=false;
+let st={},kind="manual",dirty=false,tdirty=false,timer,snapTimer,busy=false;
 
 async function api(path,opt={}){
   const r=await fetch(path,{credentials:"same-origin",headers:{"Content-Type":"application/json"},...opt});
@@ -1192,6 +1246,8 @@ async function refresh(first){try{
   $("sd").textContent=sub;
   if(!busy)renderActions(st.state);
   if(first||!dirty)loadSched(st.horario);
+  if((first||!tdirty)&&document.activeElement!==$("titulo"))$("titulo").value=st.titulo||"";
+  $("tsave").disabled=!st.api;if(!st.api)$("tmsg").textContent="Para cambiar el título hay que autorizar la cuenta de YouTube";
   const pre=$("logs"),atEnd=pre.scrollTop+pre.clientHeight>=pre.scrollHeight-5;pre.textContent=st.logs.join("\n");if(atEnd)pre.scrollTop=pre.scrollHeight;
 }catch(e){}}
 function snap(){const img=new Image();img.onload=()=>{$("snap").src=img.src;$("nosnap").style.display="none"};
@@ -1222,6 +1278,12 @@ $("copy").onclick=()=>{const f=dayRows.find(r=>r.cb.checked);if(!f)return flash(
   dayRows.forEach(r=>{r.cb.checked=true;r.row.classList.remove("off");r.a.value=f.a.value;r.b.value=f.b.value});dirty=true};
 $("save").onclick=async()=>{try{const h=buildSpec();await api("/api/horario",{method:"POST",body:JSON.stringify({horario:h})});
   dirty=false;flash($("hmsg"),"Programación guardada",true);refresh(true)}catch(e){flash($("hmsg"),e.message)}};
+
+/* ---------- título ---------- */
+$("titulo").oninput=()=>{tdirty=true};
+$("tsave").onclick=async()=>{const b=$("tsave");b.disabled=true;
+  try{const r=await api("/api/titulo",{method:"POST",body:JSON.stringify({titulo:$("titulo").value,actual:$("tactual").checked})});
+    tdirty=false;flash($("tmsg"),r.msg,true)}catch(e){flash($("tmsg"),e.message)}b.disabled=false};
 
 /* ---------- sesión ---------- */
 $("lf").onsubmit=async e=>{e.preventDefault();try{await api("/api/login",{method:"POST",body:JSON.stringify({pin:$("pin").value})});
