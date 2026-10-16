@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.conf
+*.log
+ffmpeg/
+client_secret*.json
+youtube-token.json
+youtube-state.json
